@@ -5,7 +5,10 @@ import android.app.Service
 import android.bluetooth.*
 import android.content.Intent
 import android.os.*
-import com.elvitalya.ktg_migrate.EState.*
+import com.elvitalya.ktg_migrate.java.EState
+import com.elvitalya.ktg_migrate.java.EState.*
+import com.elvitalya.ktg_migrate.java.PSChartData
+import com.elvitalya.ktg_migrate.java.PSDecoder
 import com.luckcome.lmtpdecorder.LMTPDecoderListener
 import com.luckcome.lmtpdecorder.data.FhrData
 import java.io.File
@@ -17,45 +20,41 @@ import kotlin.math.floor
 
 @SuppressLint("MissingPermission")
 class KtgService : Service() {
-    //region Private fields
-    private var mBluetoothAdapter: BluetoothAdapter? = null
-    private var mCallback: KtgCallback? = null
-    private var mBtDevice: BluetoothDevice? = null
-    private var mLMTPDecoder: PSDecoder? = null
-    private var mLMTPDListener: LMTPDListener? = null
-    private var mBinder: KtgBinder? = null
-    private var mHandler: Handler? = null
+    private lateinit var mBluetoothAdapter: BluetoothAdapter
+    private lateinit var mBtDevice: BluetoothDevice
     private var mBluetoothGatt: BluetoothGatt? = null
+    lateinit var ktgCallback: KtgCallback
+    private var mLMTPDecoder = PSDecoder()
+    private var mLMTPDListener = LMTPDListener()
+    private lateinit var mBinder: KtgBinder
+    private lateinit var mHandler: Handler
     private var mSocket: BluetoothSocket? = null
-    private var mReadThread: Thread? = null
-    private var mRecordFile: File? = null
+    private val mReadThread = ReadThread()
+    private lateinit var mRecordFile: File
     var recordLastStartTime: Long = 0
         private set
-    private var mSerialNumber: String? = null
-    private var mDeviceModel: String? = null
-    private var mManufacturer: String? = null
-    private var mCharQueue: LinkedList<BluetoothGattCharacteristic>? = null
+    private var mSerialNumber: String = ""
+    private var mDeviceModel: String = ""
+    private var mManufacturer: String = ""
+    private var mCharQueue: LinkedList<BluetoothGattCharacteristic> = LinkedList()
     private var isCharsReceived = false
-    private var mConnectionTimeoutHandler: Handler? = null
-    private var mConnectionTimeoutRunnable: Runnable? = null
+    private var mConnectionTimeoutHandler: Handler = Handler(Looper.getMainLooper())
+    private lateinit var mConnectionTimeoutRunnable: Runnable
     private var mConnTime: Long = 0
-    private var mState: EState? = null
+    private var mState: EState = Empty()
 
-    //endregion
-    //region Constants
-    private val CONNECTION_TIMEOUT_MILLIS = 10000
-    private val UNKNOWN_GATT_CONNECTION_ERROR = 133
-    private val UUID_SERVICE_DEVICE_INFO = convertFromInteger(0x180A)
-    private val UUID_SERVICE_MAIN = convertFromInteger(0xFFF0)
-    private val UUID_MAIN_DATA = convertFromInteger(0xFFF1)
-    private val UUID_DEVICE_MODEL = convertFromInteger(0x2A24)
-    private val UUID_SERIAL_NUMBER = convertFromInteger(0x2A25)
-    private val UUID_MANUFACTURER = convertFromInteger(0x2A29)
-    private val UUID_MAIN_DESCRIPTOR = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
-    //endregion
-    //region Public methods
-    override fun onBind(intent: Intent): IBinder? {
+    private val connectionTimeoutMillis = 10000
+    private val unknownGattConnectionError = 133
+    private val uuidServiceDeviceInfo = convertFromInteger(0x180A)
+    private val uuidServiceMain = convertFromInteger(0xFFF0)
+    private val uuidMainData = convertFromInteger(0xFFF1)
+    private val uuidDeviceModel = convertFromInteger(0x2A24)
+    private val uuidSerialNumber = convertFromInteger(0x2A25)
+    private val uuidManufacturer = convertFromInteger(0x2A29)
+    private val uuidMainDescriptor = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+
+    override fun onBind(intent: Intent): IBinder {
         return mBinder
     }
 
@@ -65,25 +64,25 @@ class KtgService : Service() {
 
             override fun handleMessage(msg: Message) {
                 when (msg.what) {
-                    MSG_CONNECTION_STARTED -> if (mBluetoothAdapter!!.isEnabled) {
+                    MSG_CONNECTION_STARTED -> if (mBluetoothAdapter.isEnabled) {
                         if (mBluetoothGatt != null) {
                             try {
-                                mBluetoothGatt!!.discoverServices()
+                                mBluetoothGatt?.discoverServices()
                             } catch (e: SecurityException) {
                                 e.printStackTrace()
                             }
                         }
-                        mConnectionTimeoutHandler!!.removeCallbacks(mConnectionTimeoutRunnable!!)
+                        mConnectionTimeoutHandler.removeCallbacks(mConnectionTimeoutRunnable)
                     }
-                    MSG_CONNECTION_FINISHED -> if (mState?.connectionStatus != STATUS_UNSTABLE) {
+                    MSG_CONNECTION_FINISHED -> if (mState.connectionStatus != STATUS_UNSTABLE) {
                         mConnTime = System.currentTimeMillis()
-                        mCallback?.onConnectionStatusChanged(STATUS_CONNECTION_SUCCESSFUL)
-                        mState?.connected()
-                        if (mState is EState.Pause) {
-                            mCallback?.onConnectionStatusChanged(STATUS_RECONNECTED)
+                        ktgCallback.onConnectionStatusChanged(STATUS_CONNECTION_SUCCESSFUL)
+                        mState.connected()
+                        if (mState is Pause) {
+                            ktgCallback.onConnectionStatusChanged(STATUS_RECONNECTED)
                             val monitor: ExaminationData.Monitor =
-                                (mState as EState.Pause).monitorData
-                            updateState(EState.Recording(monitor))
+                                (mState as Pause).monitorData
+                            updateState(Recording(monitor))
                             monitor.reconnectPoints.add(recordDuration)
                         } else {
                             updateState(mState)
@@ -94,27 +93,27 @@ class KtgService : Service() {
                         readDeviceData()
                     }
                     MSG_GOT_SERVICES -> {
-                        val mainService = mBluetoothGatt!!.getService(UUID_SERVICE_MAIN)
+                        val mainService = mBluetoothGatt?.getService(uuidServiceMain)
                         val deviceInfoService =
-                            mBluetoothGatt!!.getService(UUID_SERVICE_DEVICE_INFO)
+                            mBluetoothGatt?.getService(uuidServiceDeviceInfo)
                         if (mainService != null && deviceInfoService != null) {
-                            val mainCharacteristic = mainService.getCharacteristic(UUID_MAIN_DATA)
-                            if (mDeviceModel == null) {
+                            val mainCharacteristic = mainService.getCharacteristic(uuidMainData)
+                            if (mDeviceModel == "") {
                                 val modelCharacteristic =
-                                    deviceInfoService.getCharacteristic(UUID_DEVICE_MODEL)
-                                mCharQueue!!.add(modelCharacteristic)
+                                    deviceInfoService.getCharacteristic(uuidDeviceModel)
+                                mCharQueue.add(modelCharacteristic)
                             }
-                            if (mSerialNumber == null) {
+                            if (mSerialNumber == "") {
                                 val serialCharacteristic =
-                                    deviceInfoService.getCharacteristic(UUID_SERIAL_NUMBER)
-                                mCharQueue!!.add(serialCharacteristic)
+                                    deviceInfoService.getCharacteristic(uuidSerialNumber)
+                                mCharQueue.add(serialCharacteristic)
                             }
-                            if (mManufacturer == null) {
+                            if (mManufacturer == "") {
                                 val manufacturerCharacteristic =
-                                    deviceInfoService.getCharacteristic(UUID_MANUFACTURER)
-                                mCharQueue!!.add(manufacturerCharacteristic)
+                                    deviceInfoService.getCharacteristic(uuidManufacturer)
+                                mCharQueue.add(manufacturerCharacteristic)
                             }
-                            mCharQueue!!.add(mainCharacteristic)
+                            mCharQueue.add(mainCharacteristic)
                             readNextCharacteristic()
                         }
                     }
@@ -135,60 +134,53 @@ class KtgService : Service() {
                         readNextCharacteristic()
                     }
                     MSG_DISCONNECTED -> {
-                        mState?.disconnected()
-                        mReadThread = null
+                        mState.disconnected()
                         mSocket = null
-                        mConnectionTimeoutHandler!!.removeCallbacks(mConnectionTimeoutRunnable!!)
-                        if (mConnTime + 10000 > System.currentTimeMillis() && isCharsReceived && mBluetoothAdapter!!.isEnabled) {
-                            mState?.connectionUnstable()
+                        mConnectionTimeoutHandler.removeCallbacks(mConnectionTimeoutRunnable)
+                        if (mConnTime + 10000 > System.currentTimeMillis() && isCharsReceived && mBluetoothAdapter.isEnabled) {
+                            mState.connectionUnstable()
                             if (mBluetoothGatt != null) {
                                 try {
-                                    mBluetoothGatt!!.disconnect()
-                                    mBluetoothGatt!!.close()
+                                    mBluetoothGatt?.disconnect()
+                                    mBluetoothGatt?.close()
                                 } catch (e: SecurityException) {
                                     e.printStackTrace()
                                 }
                             }
                             post { connect() }
-                            mCallback?.onConnectionStatusChanged(ERROR_CONNECTION_UNSTABLE)
+                            ktgCallback.onConnectionStatusChanged(ERROR_CONNECTION_UNSTABLE)
                         } else {
-                            if ((mState !is EState.Complete) and (mState !is EState.Empty)) {
-                                updateState(EState.Pause(mState?.monitorData))
+                            if ((mState !is Complete) and (mState !is Empty)) {
+                                updateState(Pause(mState.monitorData))
                             }
-                            mCallback?.onConnectionStatusChanged(ERROR_CONNECTION_LOST)
+                            ktgCallback.onConnectionStatusChanged(ERROR_CONNECTION_LOST)
                         }
                     }
                     MSG_CONNECTION_ERROR -> {
-                        mState?.disconnected()
-                        mCallback?.onConnectionStatusChanged(ERROR_CONNECTION_FAILED)
-                        mConnectionTimeoutHandler!!.removeCallbacks(mConnectionTimeoutRunnable!!)
-                        mReadThread = null
+                        mState.disconnected()
+                        ktgCallback.onConnectionStatusChanged(ERROR_CONNECTION_FAILED)
+                        mConnectionTimeoutHandler.removeCallbacks(mConnectionTimeoutRunnable)
                         mSocket = null
                     }
                 }
             }
         }
         mBluetoothAdapter = (getSystemService(BLUETOOTH_SERVICE) as BluetoothManager).adapter
-        mCharQueue = LinkedList()
-        mLMTPDecoder = PSDecoder()
-        mLMTPDListener = LMTPDListener()
-        mLMTPDecoder?.setLMTPDecoderListener(mLMTPDListener)
-        mLMTPDecoder?.prepare()
-        mConnectionTimeoutHandler = Handler()
+        mLMTPDecoder.setLMTPDecoderListener(mLMTPDListener)
+        mLMTPDecoder.prepare()
         mConnectionTimeoutRunnable = Runnable {
             if (mBluetoothGatt != null) {
                 try {
-                    mBluetoothGatt!!.disconnect()
-                    mBluetoothGatt!!.close()
-                    mHandler?.sendEmptyMessage(MSG_CONNECTION_ERROR)
-                    mState?.disconnected()
+                    mBluetoothGatt?.disconnect()
+                    mBluetoothGatt?.close()
+                    mHandler.sendEmptyMessage(MSG_CONNECTION_ERROR)
+                    mState.disconnected()
                 } catch (e: SecurityException) {
                     e.printStackTrace()
                 }
             }
         }
         enableLog()
-        mState = EState.Empty()
     }
 
     override fun onDestroy() {
@@ -202,95 +194,74 @@ class KtgService : Service() {
     }
 
     fun start() {
-        startRecordWave()
+        if (!mLMTPDecoder.isWorking) mLMTPDecoder.startWork()
         connect()
     }
 
-    private fun tryToReconnect() {
-        if (!mState?.isConnectingOrConnected!!) {
-            start()
-        }
-    }
-
-    fun cancel() {
+    private fun cancel() {
         updateState(Empty())
-        if (mSocket != null) {
-            try {
-                mSocket!!.close()
-            } catch (e: IOException) {
-                e.printStackTrace()
-            }
+        try {
+            mSocket?.close()
+        } catch (e: IOException) {
+            e.printStackTrace()
         }
-        if (mBluetoothGatt != null) {
-            try {
-                mBluetoothGatt!!.disconnect()
-                mBluetoothGatt!!.close()
-            } catch (e: SecurityException) {
-                e.printStackTrace()
-            }
-        }
-        if (mRecordFile != null && mRecordFile!!.exists()) {
-            mRecordFile!!.delete()
-        }
-        mSocket = null
-        mReadThread = null
-        stopRecordWave()
-        mLMTPDecoder?.release()
-        mLMTPDecoder = null
-        mLMTPDListener = null
-    }
 
-    fun setCallback(cb: KtgCallback?) {
-        mCallback = cb
+
+        try {
+            mBluetoothGatt?.disconnect()
+            mBluetoothGatt?.close()
+        } catch (e: SecurityException) {
+            e.printStackTrace()
+        }
+
+        if (this::mRecordFile.isInitialized && mRecordFile.exists()) mRecordFile.delete()
+        mSocket = null
+        if (mLMTPDecoder.isWorking) mLMTPDecoder.stopWork()
+        mLMTPDecoder.release()
     }
 
     fun startRecording() {
-        if (mState?.connectionStatus == STATUS_CONNECTED) {
+        if (mState.connectionStatus == STATUS_CONNECTED) {
             if (mState !is Recording) {
                 if (mState is Pause) {
                     val dur = recordDuration
                     updateState(Recording((mState as Pause).monitorData))
                     val monitor: ExaminationData.Monitor = (mState as Pause).monitorData
                     monitor.addReconnectPoint(dur)
-                    if (!mLMTPDecoder?.isRecording!!) {
-                        mLMTPDecoder!!.continueRecordWave()
+                    if (!mLMTPDecoder.isRecording) {
+                        mLMTPDecoder.continueRecordWave()
                     }
                 } else {
-                    mState?.monitorData?.clear()
+                    mState.monitorData?.clear()
                     createWaveFile()
-                    updateState(Recording(mState?.monitorData))
+                    updateState(Recording(mState.monitorData))
                 }
             }
         } else {
-            tryToReconnect()
+            if (!mState.isConnectingOrConnected) start()
         }
     }
 
     fun pauseRecording() {
         if (mState is Recording) {
-            updateState(Pause(mState?.monitorData))
+            updateState(Pause(mState.monitorData))
         }
     }
 
     fun finishRecording() {
-        if (mState is Recording ||
-            mState is Pause
-        ) {
-            if (mLMTPDecoder != null && mLMTPDecoder?.isRecording == true) {
-                mLMTPDecoder?.finishRecordWave()
+        if (mState is Recording || mState is Pause) {
+            if (mLMTPDecoder.isRecording) {
+                mLMTPDecoder.finishRecordWave()
             }
             val record: ExaminationData.Record =
                 ExaminationData.Record(floor(recordDuration.toDouble()).toInt(), mRecordFile)
-            updateState(Complete.Saving(mState?.monitorData, record))
+            updateState(Complete.Saving(mState.monitorData, record))
         }
     }
 
     fun clear() {
-        if (mRecordFile != null && mRecordFile!!.exists()) {
-            mRecordFile!!.delete()
-        }
-        mRecordFile = null
-        mState?.monitorData?.clear()
+        if (mRecordFile.exists()) mRecordFile.delete()
+        mState.monitorData?.clear()
     }
 
     fun dismissRecording() {
@@ -301,11 +272,11 @@ class KtgService : Service() {
         get() = if (mState is Recording) {
             (mState as Recording).totalRecordDuration + (System.currentTimeMillis() - recordLastStartTime).toFloat() / 1000f
         } else {
-            mState?.monitorData?.datasetDuration!!
+            mState.monitorData?.datasetDuration ?: 0f
         }
 
     fun setSavingFailed() {
-        val monitor: ExaminationData.Monitor = mState?.monitorData!!
+        val monitor: ExaminationData.Monitor = mState.monitorData
         monitor.addReconnectPoint(recordDuration)
         updateState(Pause(monitor))
     }
@@ -313,7 +284,7 @@ class KtgService : Service() {
     fun examinationSaved(metaInfo: ExaminationMetaInfo?) {
         updateState(
             Complete.Success(
-                mState?.monitorData,
+                mState.monitorData,
                 (mState as Complete?)?.recordData,
                 metaInfo
             )
@@ -324,29 +295,16 @@ class KtgService : Service() {
         updateState(Empty())
     }
 
-    private fun stopRecordWave() {
-        if (mLMTPDecoder != null && mLMTPDecoder?.isWorking == true) {
-            mLMTPDecoder?.stopWork()
-        }
-    }
-
-    private fun startRecordWave() {
-        if (mLMTPDecoder != null && mLMTPDecoder?.isWorking == false) {
-            mLMTPDecoder?.startWork()
-        }
-    }
-
-    val state: EState?
+    val state: EState
         get() = mState
-    //endregion
-    //region Private methods
+
     /**
      * Соединение с устройством, получение характеристик
      * и подписка на изменение данных монитора
      */
     private fun connect() {
-        if (mLMTPDecoder != null && mLMTPDecoder?.isWorking == true) {
-            if (!mBluetoothAdapter!!.isEnabled) {
+        if (mLMTPDecoder.isWorking) {
+            if (!mBluetoothAdapter.isEnabled) {
                 //TODO show error
 //                PSDialogUtils.doShowErrorFromResult(
 //                    this,
@@ -355,12 +313,12 @@ class KtgService : Service() {
                 return
             }
             val version = Build.VERSION.SDK_INT
-            if (mState?.connectionStatus == STATUS_UNSTABLE) {
-                mHandler!!.postDelayed({
+            if (mState.connectionStatus == STATUS_UNSTABLE) {
+                mHandler.postDelayed({
                     Thread { connectToDeviceSocket() }.start()
                 }, 250)
-            } else if (mState?.connectionStatus == STATUS_DISCONNECTED) {
-                mState?.connectionStarted()
+            } else if (mState.connectionStatus == STATUS_DISCONNECTED) {
+                mState.connectionStarted()
                 if (version >= Build.VERSION_CODES.N || version < Build.VERSION_CODES.LOLLIPOP) {
                     connectToDeviceLe() //Для этих версий необходимо подключаться к gatt в UI потоке
                 } else {
@@ -374,32 +332,36 @@ class KtgService : Service() {
      * Соединение с устройством по LE-каналу
      */
     private fun connectToDeviceLe() {
-        if (mBluetoothGatt != null) {
-            try {
-                mBluetoothGatt!!.disconnect()
-            } catch (e: SecurityException) {
-                e.printStackTrace()
-            }
+
+        try {
+            mBluetoothGatt?.disconnect()
+        } catch (e: SecurityException) {
+            e.printStackTrace()
         }
+
         val callback: BluetoothGattCallback = object : BluetoothGattCallback() {
             override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
                 super.onConnectionStateChange(gatt, status, newState)
-                if (status == UNKNOWN_GATT_CONNECTION_ERROR) {
-                    mHandler!!.sendEmptyMessage(MSG_CONNECTION_ERROR)
+                if (status == unknownGattConnectionError) {
+                    mHandler.sendEmptyMessage(MSG_CONNECTION_ERROR)
                     return
                 }
-                if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                    mHandler!!.sendEmptyMessage(MSG_DISCONNECTED)
-                } else if (newState == BluetoothProfile.STATE_CONNECTED) {
-                    mHandler!!.sendEmptyMessage(MSG_CONNECTION_STARTED)
-                } else {
-                    mHandler!!.sendEmptyMessage(MSG_DISCONNECTED)
+                when (newState) {
+                    BluetoothProfile.STATE_DISCONNECTED -> {
+                        mHandler.sendEmptyMessage(MSG_DISCONNECTED)
+                    }
+                    BluetoothProfile.STATE_CONNECTED -> {
+                        mHandler.sendEmptyMessage(MSG_CONNECTION_STARTED)
+                    }
+                    else -> {
+                        mHandler.sendEmptyMessage(MSG_DISCONNECTED)
+                    }
                 }
             }
 
             override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
                 super.onServicesDiscovered(gatt, status)
-                mHandler!!.sendEmptyMessage(MSG_GOT_SERVICES)
+                mHandler.sendEmptyMessage(MSG_GOT_SERVICES)
             }
 
             override fun onCharacteristicRead(
@@ -413,15 +375,19 @@ class KtgService : Service() {
                 message.what = MSG_GOT_CHARACTERISTICS
                 val data = Bundle()
                 val value = characteristic.getStringValue(0)
-                if (charUUID == UUID_DEVICE_MODEL) {
-                    data.putString(EXTRA_DEVICE_MODEL, value)
-                } else if (charUUID == UUID_SERIAL_NUMBER) {
-                    data.putString(EXTRA_SERIAL_NUMBER, value)
-                } else if (charUUID == UUID_MANUFACTURER) {
-                    data.putString(EXTRA_MANUFACTURER, value)
+                when (charUUID) {
+                    uuidDeviceModel -> {
+                        data.putString(EXTRA_DEVICE_MODEL, value)
+                    }
+                    uuidSerialNumber -> {
+                        data.putString(EXTRA_SERIAL_NUMBER, value)
+                    }
+                    uuidManufacturer -> {
+                        data.putString(EXTRA_MANUFACTURER, value)
+                    }
                 }
                 message.data = data
-                mHandler!!.sendMessage(message)
+                mHandler.sendMessage(message)
             }
 
             override fun onCharacteristicChanged(
@@ -429,7 +395,7 @@ class KtgService : Service() {
                 characteristic: BluetoothGattCharacteristic
             ) {
                 super.onCharacteristicChanged(gatt, characteristic)
-                mLMTPDecoder?.putData(characteristic.value)
+                mLMTPDecoder.putData(characteristic.value)
             }
 
             override fun onDescriptorWrite(
@@ -438,39 +404,38 @@ class KtgService : Service() {
                 status: Int
             ) {
                 super.onDescriptorWrite(gatt, descriptor, status)
-                mHandler!!.sendEmptyMessage(MSG_CONNECTION_FINISHED)
+                mHandler.sendEmptyMessage(MSG_CONNECTION_FINISHED)
             }
         }
         try {
             if (mBluetoothGatt == null) {
-                mCallback?.onConnectionStatusChanged(STATUS_CONNECTION_STARTED)
+                ktgCallback.onConnectionStatusChanged(STATUS_CONNECTION_STARTED)
                 mBluetoothGatt = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                    mBtDevice!!.connectGatt(
+                    mBtDevice.connectGatt(
                         this@KtgService,
                         false,
                         callback,
                         BluetoothDevice.TRANSPORT_LE
                     ) //Для версий выше M необходимо вручную задавать transport. Причина неизвестна.
                 } else {
-                    mBtDevice!!.connectGatt(
+                    mBtDevice.connectGatt(
                         this@KtgService,
                         true,
                         callback
                     ) //Lollipop и ниже не подлючаются без флага autoConnect = true. Причина неизвестна.
                 }
             } else {
-                mBluetoothGatt!!.close()
-                mBluetoothGatt = null
-                mState?.disconnected()
+                mBluetoothGatt?.close()
+                mState.disconnected()
                 connect()
             }
         } catch (e: SecurityException) {
             e.printStackTrace()
         }
-        mConnectionTimeoutHandler!!.removeCallbacks(mConnectionTimeoutRunnable!!)
-        mConnectionTimeoutHandler!!.postDelayed(
-            mConnectionTimeoutRunnable!!,
-            CONNECTION_TIMEOUT_MILLIS.toLong()
+        mConnectionTimeoutHandler.removeCallbacks(mConnectionTimeoutRunnable)
+        mConnectionTimeoutHandler.postDelayed(
+            mConnectionTimeoutRunnable,
+            connectionTimeoutMillis.toLong()
         )
     }
 
@@ -480,42 +445,42 @@ class KtgService : Service() {
      */
     private fun connectToDeviceSocket() {
         try {
-            if (mBtDevice!!.bondState == BluetoothDevice.BOND_NONE) {
-                mBtDevice!!.createBond()
+            if (mBtDevice.bondState == BluetoothDevice.BOND_NONE) {
+                mBtDevice.createBond()
             }
-            if (mBtDevice!!.bondState == BluetoothDevice.BOND_BONDING) {
-                mHandler!!.postDelayed({ connectToDeviceSocket() }, 150)
+            if (mBtDevice.bondState == BluetoothDevice.BOND_BONDING) {
+                mHandler.postDelayed({ connectToDeviceSocket() }, 150)
                 return
             }
             if (mSocket == null) {
                 mSocket = try {
-                    mBtDevice!!.createInsecureRfcommSocketToServiceRecord(MY_UUID)
+                    mBtDevice.createInsecureRfcommSocketToServiceRecord(myUuid)
                 } catch (e: IOException) {
-                    mHandler!!.sendEmptyMessage(MSG_CONNECTION_ERROR)
+                    mHandler.sendEmptyMessage(MSG_CONNECTION_ERROR)
                     return
                 }
                 try {
-                    if (mBtDevice!!.name != null && mBtDevice!!.name.isNotEmpty()) {
+                    if (mBtDevice.name != null && mBtDevice.name.isNotEmpty()) {
                         mSocket?.connect()
-                        mHandler!!.sendEmptyMessage(MSG_CONNECTION_FINISHED)
+                        mHandler.sendEmptyMessage(MSG_CONNECTION_FINISHED)
                     } else {
-                        mHandler!!.sendEmptyMessage(MSG_CONNECTION_ERROR)
+                        mHandler.sendEmptyMessage(MSG_CONNECTION_ERROR)
                     }
                 } catch (e: Exception) {
                     try {
-                        val clazz: Class<*> = mBtDevice!!.javaClass
+                        val clazz: Class<*> = mBtDevice.javaClass
                         val paramTypes = arrayOf<Class<*>>(Integer.TYPE)
                         val m = clazz.getMethod("createRfcommSocket", *paramTypes)
                         val params = arrayOf<Any>(Integer.valueOf(1))
                         mSocket = m.invoke(mBtDevice, *params) as BluetoothSocket
-                        mSocket!!.connect()
-                        mHandler!!.sendEmptyMessage(MSG_CONNECTION_FINISHED)
+                        mSocket?.connect()
+                        mHandler.sendEmptyMessage(MSG_CONNECTION_FINISHED)
                     } catch (e1: Exception) {
-                        mState?.disconnected()
-                        mHandler!!.sendEmptyMessage(MSG_CONNECTION_ERROR)
-                        mHandler!!.post {
+                        mState.disconnected()
+                        mHandler.sendEmptyMessage(MSG_CONNECTION_ERROR)
+                        mHandler.post {
                             if (mState is Recording) {
-                                updateState(Pause(mState?.monitorData))
+                                updateState(Pause(mState.monitorData))
                             }
                         }
                         mSocket = null
@@ -531,36 +496,33 @@ class KtgService : Service() {
         if (mSocket == null) {
             connect()
         } else {
-            mState?.connected()
-            mReadThread = ReadThread()
-            mReadThread!!.start()
+            mState.connected()
+            mReadThread.start()
         }
     }
 
     private fun readNextCharacteristic() {
         try {
-            if (!mCharQueue!!.isEmpty()) {
-                val characteristic = mCharQueue!!.removeAt(0)
-                if (characteristic.uuid == UUID_MAIN_DATA) {
-                    val descriptor = characteristic.getDescriptor(UUID_MAIN_DESCRIPTOR)
+            if (!mCharQueue.isEmpty()) {
+                val characteristic = mCharQueue.removeAt(0)
+                if (characteristic.uuid == uuidMainData) {
+                    val descriptor = characteristic.getDescriptor(uuidMainDescriptor)
                     descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                    mBluetoothGatt!!.setCharacteristicNotification(characteristic, true)
-                    mBluetoothGatt!!.writeDescriptor(descriptor)
+                    mBluetoothGatt?.setCharacteristicNotification(characteristic, true)
+                    mBluetoothGatt?.writeDescriptor(descriptor)
                 } else {
-                    mBluetoothGatt!!.readCharacteristic(characteristic)
+                    mBluetoothGatt?.readCharacteristic(characteristic)
                 }
-            } else if (mCallback != null && mDeviceModel != null && mManufacturer != null && mSerialNumber != null) {
+            } else if (mDeviceModel != "" && mManufacturer != "" && mSerialNumber != "") {
                 isCharsReceived = true
                 val deviceModel = "$mManufacturer $mDeviceModel"
-                val deviceName = mBtDevice!!.name
-                if (deviceName != null && deviceName.isNotEmpty() && mSerialNumber!!.replace(
-                        "0".toRegex(),
-                        ""
-                    ).isEmpty()
+                val deviceName = mBtDevice.name
+                if (deviceName != null && deviceName.isNotEmpty()
+                    && mSerialNumber.replace("0".toRegex(), "").isEmpty()
                 ) {
                     mSerialNumber = deviceName
                 }
-                mCallback?.onCharacteristicsReceived(mSerialNumber, deviceModel)
+                ktgCallback.onCharacteristicsReceived(mSerialNumber, deviceModel)
             }
         } catch (e: SecurityException) {
             e.printStackTrace()
@@ -568,26 +530,26 @@ class KtgService : Service() {
     }
 
     private fun convertFromInteger(i: Int): UUID {
-        val MSB = 0x0000000000001000L
-        val LSB = -0x7fffff7fa064cb05L
+        val msb = 0x0000000000001000L
+        val lsb = -0x7fffff7fa064cb05L
         val value = (i and -0x1).toLong()
-        return UUID(MSB or (value shl 32), LSB)
+        return UUID(msb or (value shl 32), lsb)
     }
 
-    private fun sleep(millis: Long) {
+    private fun sleep() {
         try {
-            Thread.sleep(millis)
+            Thread.sleep(20)
         } catch (e: InterruptedException) {
             e.printStackTrace()
         }
     }
 
-    private fun updateState(state: EState?) {
-        state?.connectionStatus = mState?.connectionStatus!!
+    private fun updateState(state: EState) {
+        state.connectionStatus = mState.connectionStatus
         if (state is Pause && mState !is Pause) {
-            state.setTotalRecordDuration(mState?.monitorData?.datasetDuration!!)
+            state.setTotalRecordDuration(mState.monitorData?.datasetDuration!!)
         } else {
-            state?.totalRecordDuration = mState?.totalRecordDuration!!
+            state.totalRecordDuration = mState.totalRecordDuration
             if (state is Recording) {
                 if (mState !is Pause) {
                     state.setTotalRecordDuration(0f)
@@ -596,14 +558,14 @@ class KtgService : Service() {
             }
         }
         mState = state
-        mCallback?.onStateChanged(state)
+        ktgCallback.onStateChanged(state)
     }
 
     private fun createWaveFile() {
         val directory = filesDir
         val fname = "CTG_" + java.lang.Long.toHexString(System.currentTimeMillis())
         val child = "$fname.wav"
-        mRecordFile = mLMTPDecoder?.beginRecordWave(directory, child)
+        mRecordFile = mLMTPDecoder.beginRecordWave(directory, child)
     }
 
     inner class KtgBinder : Binder() {
@@ -619,17 +581,17 @@ class KtgService : Service() {
             try {
                 mIs = mSocket!!.inputStream
             } catch (e: IOException) {
-                mState?.disconnected()
+                mState.disconnected()
             }
             var len: Int
             val buffer = ByteArray(2048)
-            while (mState?.connectionStatus == STATUS_CONNECTED) {
+            while (mState.connectionStatus == STATUS_CONNECTED) {
                 try {
                     len = mIs!!.read(buffer)
-                    mLMTPDecoder?.putData(buffer, 0, len)
-                    this@KtgService.sleep(20)
+                    mLMTPDecoder.putData(buffer, 0, len)
+                    this@KtgService.sleep()
                 } catch (e: IOException) {
-                    mHandler!!.sendEmptyMessage(MSG_DISCONNECTED)
+                    mHandler.sendEmptyMessage(MSG_DISCONNECTED)
                 }
             }
             try {
@@ -644,14 +606,14 @@ class KtgService : Service() {
         override fun fhrDataChanged(fhrData: FhrData?) {
             val data: PSChartData = PSChartData.map(fhrData)
             data.time = recordDuration
-            if (mState is EState.Recording) {
-                mState?.monitorData?.data?.add(data)
+            if (mState is Recording) {
+                mState.monitorData?.data?.add(data)
             }
-            mCallback?.onMonitorDataReceived(data)
+            ktgCallback.onMonitorDataReceived(data)
         }
 
         override fun sendCommand(cmd: ByteArray?) {}
-    } //endregion
+    }
 
     companion object {
         const val STATUS_CONNECTION_STARTED = 13
@@ -669,6 +631,6 @@ class KtgService : Service() {
         private const val EXTRA_DEVICE_MODEL = "EXTRA_DEVICE_MODEL"
         private const val EXTRA_SERIAL_NUMBER = "EXTRA_SERIAL_NUMBER"
         private const val EXTRA_MANUFACTURER = "EXTRA_MANUFACTURER"
-        val MY_UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
+        val myUuid: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
     }
 }

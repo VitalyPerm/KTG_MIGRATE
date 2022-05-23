@@ -26,6 +26,8 @@ import com.elvitalya.ktg_migrate.KtgService.Companion.ERROR_CONNECTION_UNSTABLE
 import com.elvitalya.ktg_migrate.KtgService.Companion.STATUS_CONNECTION_STARTED
 import com.elvitalya.ktg_migrate.KtgService.Companion.STATUS_CONNECTION_SUCCESSFUL
 import com.elvitalya.ktg_migrate.KtgService.Companion.STATUS_RECONNECTED
+import com.elvitalya.ktg_migrate.java.EState
+import com.elvitalya.ktg_migrate.java.PSChartData
 
 const val TAG = "check___"
 
@@ -160,20 +162,19 @@ class MainActivity : AppCompatActivity() {
 
     private val mBleReceivedServiceConnection: ServiceConnection = object : ServiceConnection {
         override fun onServiceDisconnected(name: ComponentName) {
-            ktgService.setCallback(null)
             isServiceBound = false
         }
 
         override fun onServiceConnected(name: ComponentName, service: IBinder) {
             Log.d(TAG, "onServiceConnected: onServiceConnected")
             ktgService = (service as KtgService.KtgBinder).service
+            ktgService.ktgCallback = ktgCallBack
             ktgService.setBluetoothDevice(device)
             val state = ktgService.state
             if (state is EState.Empty) {
                 ktgService.start()
             }
             renderState(state)
-            ktgService.setCallback(ktgCallBack)
         }
     }
 

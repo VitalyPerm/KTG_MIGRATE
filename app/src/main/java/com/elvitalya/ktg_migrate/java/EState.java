@@ -1,7 +1,10 @@
-package com.elvitalya.ktg_migrate;
+package com.elvitalya.ktg_migrate.java;
 
 import androidx.annotation.IntDef;
 import android.util.Log;
+
+import com.elvitalya.ktg_migrate.ExaminationData;
+import com.elvitalya.ktg_migrate.ExaminationMetaInfo;
 
 import java.util.ArrayList;
 import java.util.Collections;

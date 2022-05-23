@@ -1,4 +1,4 @@
-package com.elvitalya.ktg_migrate;
+package com.elvitalya.ktg_migrate.java;
 
 import com.luckcome.lmtpdecorder.data.FhrData;
 

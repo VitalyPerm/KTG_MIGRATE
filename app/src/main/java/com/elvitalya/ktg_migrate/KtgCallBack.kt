@@ -1,5 +1,8 @@
 package com.elvitalya.ktg_migrate
 
+import com.elvitalya.ktg_migrate.java.EState
+import com.elvitalya.ktg_migrate.java.PSChartData
+
 interface KtgCallback {
     /**
      * При получении данных от монитора
